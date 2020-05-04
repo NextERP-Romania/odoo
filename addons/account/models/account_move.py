@@ -652,8 +652,6 @@ class AccountMove(models.Model):
             elif tax_line:
                 tax_line.update({
                     'amount_currency': taxes_map_entry['amount_currency'],
-                    'debit': taxes_map_entry['balance'] > 0.0 and taxes_map_entry['balance'] or 0.0,
-                    'credit': taxes_map_entry['balance'] < 0.0 and -taxes_map_entry['balance'] or 0.0,
                     'tax_base_amount': tax_base_amount,
                 })
             else:
@@ -670,12 +668,21 @@ class AccountMove(models.Model):
                     'quantity': 1.0,
                     'date_maturity': False,
                     'amount_currency': taxes_map_entry['amount_currency'],
-                    'debit': taxes_map_entry['balance'] > 0.0 and taxes_map_entry['balance'] or 0.0,
-                    'credit': taxes_map_entry['balance'] < 0.0 and -taxes_map_entry['balance'] or 0.0,
                     'tax_base_amount': tax_base_amount,
                     'exclude_from_invoice_tab': True,
                     'tax_exigible': tax.tax_exigibility == 'on_invoice',
                     **taxes_map_entry['grouping_dict'],
+                })
+
+            if self.company_id.use_storno_accounting and self.move_type in ('in_refund', 'out_refund'):
+                tax_line.update({
+                    'debit': taxes_map_entry['balance'] > 0.0 and -taxes_map_entry['balance'] or 0.0,
+                    'credit': taxes_map_entry['balance'] < 0.0 and taxes_map_entry['balance'] or 0.0,
+                })
+            else:
+                tax_line.update({
+                    'debit': taxes_map_entry['balance'] > 0.0 and taxes_map_entry['balance'] or 0.0,
+                    'credit': taxes_map_entry['balance'] < 0.0 and -taxes_map_entry['balance'] or 0.0,
                 })
 
             if in_draft_mode:
@@ -892,16 +899,13 @@ class AccountMove(models.Model):
                     candidate.update({
                         'date_maturity': date_maturity,
                         'amount_currency': -amount_currency,
-                        'debit': balance < 0.0 and -balance or 0.0,
-                        'credit': balance > 0.0 and balance or 0.0,
                     })
                 else:
                     # Create new line.
                     create_method = in_draft_mode and self.env['account.move.line'].new or self.env['account.move.line'].create
+
                     candidate = create_method({
                         'name': self.payment_reference or '',
-                        'debit': balance < 0.0 and -balance or 0.0,
-                        'credit': balance > 0.0 and balance or 0.0,
                         'quantity': 1.0,
                         'amount_currency': -amount_currency,
                         'date_maturity': date_maturity,
@@ -911,6 +915,17 @@ class AccountMove(models.Model):
                         'partner_id': self.commercial_partner_id.id,
                         'exclude_from_invoice_tab': True,
                     })
+                if self.company_id.use_storno_accounting and self.move_type in ('in_refund', 'out_refund'):
+                    candidate.update({
+                        'debit': balance > 0.0 and -balance or 0.0,
+                        'credit': balance < 0.0 and balance or 0.0,
+                    })
+                else:
+                    candidate.update({
+                        'debit': balance < 0.0 and -balance or 0.0,
+                        'credit': balance > 0.0 and balance or 0.0,
+                    })
+
                 new_terms_lines += candidate
                 if in_draft_mode:
                     candidate._onchange_amount_currency()
@@ -1172,8 +1187,11 @@ class AccountMove(models.Model):
                     if line.debit:
                         total += line.balance
                         total_currency += line.amount_currency
-
-            if move.move_type == 'entry' or move.is_outbound():
+            if move.move_type == 'out_refund' and move.company_id.use_storno_accounting:
+                sign = -1
+            elif move.move_type == 'in_refund' and move.company_id.use_storno_accounting:
+                sign = 1
+            elif move.move_type == 'entry' or move.is_outbound():
                 sign = 1
             else:
                 sign = -1
@@ -2073,17 +2091,27 @@ class AccountMove(models.Model):
         tax_repartition_lines_mapping = compute_tax_repartition_lines_mapping(move_vals)
 
         for line_command in move_vals.get('line_ids', []):
-            line_vals = line_command[2]  # (0, 0, {...})
 
+            line_vals = line_command[2]  # (0, 0, {...})
             # ==== Inverse debit / credit / amount_currency ====
             amount_currency = -line_vals.get('amount_currency', 0.0)
-            balance = line_vals['credit'] - line_vals['debit']
+            if self.company_id.use_storno_accounting:
+                line_vals.update({
+                    'amount_currency': amount_currency,
+                    'debit': -line_vals['debit'] or 0.0,
+                    'credit': -line_vals['credit'] or 0.0,
+                })
+                if not line_vals['exclude_from_invoice_tab']:
+                    line_vals['quantity'] = -line_vals['quantity']
 
-            line_vals.update({
-                'amount_currency': amount_currency,
-                'debit': balance > 0.0 and balance or 0.0,
-                'credit': balance < 0.0 and -balance or 0.0,
-            })
+            else:
+                balance = line_vals['credit'] - line_vals['debit']
+
+                line_vals.update({
+                    'amount_currency': amount_currency,
+                    'debit': balance > 0.0 and balance or 0.0,
+                    'credit': balance < 0.0 and -balance or 0.0,
+                })
 
             if move_vals['move_type'] not in ('out_refund', 'in_refund'):
                 continue
@@ -2248,7 +2276,7 @@ class AccountMove(models.Model):
                 elif move.is_purchase_document():
                     raise UserError(_("The field 'Vendor' is required, please complete it to validate the Vendor Bill."))
 
-            if move.is_invoice(include_receipts=True) and float_compare(move.amount_total, 0.0, precision_rounding=move.currency_id.rounding) < 0:
+            if not move.company_id.use_storno_accounting and move.is_invoice(include_receipts=True) and float_compare(move.amount_total, 0.0, precision_rounding=move.currency_id.rounding) < 0:
                 raise UserError(_("You cannot validate an invoice with a negative total amount. You should create a credit note instead. Use the action menu to transform it into a credit note or refund."))
 
             # Handle case when the invoice_date is not set. In that case, the invoice_date is set at today and then,
@@ -2759,7 +2787,7 @@ class AccountMoveLine(models.Model):
     _sql_constraints = [
         (
             'check_credit_debit',
-            'CHECK(credit + debit>=0 AND credit * debit=0)',
+            'CHECK(credit * debit=0)',
             'Wrong credit or debit value in accounting entry !'
         ),
         (
@@ -2968,7 +2996,9 @@ class AccountMoveLine(models.Model):
         :param date:            The move's date.
         :return:                A dictionary containing 'debit', 'credit', 'amount_currency'.
         '''
-        if move_type in self.move_id.get_outbound_types():
+        if move_type == 'in_refund' and self.move_id.company_id.use_storno_accounting:
+            sign = 1
+        elif move_type in self.move_id.get_outbound_types():
             sign = 1
         elif move_type in self.move_id.get_inbound_types():
             sign = -1
@@ -2986,6 +3016,20 @@ class AccountMoveLine(models.Model):
             }
         else:
             # Single-currency.
+            if company.use_storno_accounting:
+                if move_type == 'out_refund':
+                    return {
+                        'amount_currency': 0.0,
+                        'debit': price_subtotal > 0.0 and -price_subtotal or 0.0,
+                        'credit': price_subtotal < 0.0 and price_subtotal or 0.0,
+                    }
+                elif move_type == 'in_refund':
+                    return {
+                        'amount_currency': 0.0,
+                        'debit': price_subtotal < 0.0 and price_subtotal or 0.0,
+                        'credit': price_subtotal > 0.0 and -price_subtotal or 0.0,
+                    }
+
             return {
                 'amount_currency': 0.0,
                 'debit': price_subtotal > 0.0 and price_subtotal or 0.0,
@@ -3021,7 +3065,11 @@ class AccountMoveLine(models.Model):
         :param price_subtotal:  The price_subtotal.
         :return:                A dictionary containing 'quantity', 'discount', 'price_unit'.
         '''
-        if move_type in self.move_id.get_outbound_types():
+        if move_type == 'out_refund' and self.move_id.company_id.use_storno_accounting:
+            sign = -1
+        elif move_type == 'in_refund' and self.move_id.company_id.use_storno_accounting:
+            sign = 1
+        elif move_type in self.move_id.get_outbound_types():
             sign = 1
         elif move_type in self.move_id.get_inbound_types():
             sign = -1
@@ -3464,6 +3512,8 @@ class AccountMoveLine(models.Model):
                         balance = vals.get('amount_currency', 0.0)
                     else:
                         balance = vals.get('debit', 0.0) - vals.get('credit', 0.0)
+                        if move.company_id.use_storno_accounting and move.move_type in ('out_refund', 'in_refund'):
+                            balance = -balance
                     price_subtotal = self._get_price_total_and_subtotal_model(
                         vals.get('price_unit', 0.0),
                         vals.get('quantity', 0.0),
@@ -3897,6 +3947,13 @@ class AccountMoveLine(models.Model):
             can find a debit and a credit to reconcile together. It returns the recordset of the
             account move lines that were not reconciled during the process.
         """
+        if self.company_id.use_storno_accounting:
+            if debit_moves and not credit_moves:
+                credit_moves = debit_moves.filtered(lambda r: r.debit < 0)
+                debit_moves -= credit_moves
+            elif credit_moves and not debit_moves:
+                debit_moves = credit_moves.filtered(lambda r: r.credit < 0)
+                credit_moves -= debit_moves
         (debit_moves + credit_moves).read([field])
         to_create = []
         cash_basis = debit_moves and debit_moves[0].account_id.internal_type in ('receivable', 'payable') or False

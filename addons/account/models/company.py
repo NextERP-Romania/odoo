@@ -107,6 +107,8 @@ class ResCompany(models.Model):
 
     # Technical field to hide country specific fields in company form view
     country_code = fields.Char(related='country_id.code')
+    # Refund Policy
+    use_storno_accounting = fields.Boolean(string="Use storno(-) accounting for refunds")
 
     @api.constrains('account_opening_move_id', 'fiscalyear_last_day', 'fiscalyear_last_month')
     def _check_fiscalyear_last_day(self):
