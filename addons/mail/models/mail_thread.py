@@ -967,13 +967,6 @@ class MailThread(models.AbstractModel):
             # no route found for a matching reference (or reply), so parent is invalid
             message_dict.pop('parent_id', None)
             # check it does not directly contact catchall
-            if catchall_alias and catchall_alias == email_to_localpart:
-                _logger.info('Routing mail from %s to %s with Message-Id %s: direct write to catchall, bounce', email_from, email_to, message_id)
-                body = self.env.ref('mail.mail_bounce_catchall').render({
-                    'message': message,
-                }, engine='ir.qweb')
-                self._routing_create_bounce_email(email_from, body, message, reply_to=self.env.company.email)
-                return []
 
             dest_aliases = self.env['mail.alias'].search([('alias_name', 'in', rcpt_tos_localparts)])
             if dest_aliases:
@@ -988,6 +981,13 @@ class MailThread(models.AbstractModel):
                             email_from, email_to, message_id, route)
                         routes.append(route)
                 return routes
+            else:
+                 _logger.info('Routing mail from %s to %s with Message-Id %s: di$
+                body = self.env.ref('mail.mail_bounce_catchall').render({
+                    'message': message,
+                }, engine='ir.qweb')
+                self._routing_create_bounce_email(email_from, body, message, re$
+                return []
 
         # 3. Fallback to the provided parameters, if they work
         if fallback_model:
