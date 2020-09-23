@@ -58,8 +58,7 @@ class AccountReconcileModelLine(models.Model):
     * From Label: There is no need for regex delimiter, only the regex is needed. For instance if you want to extract the amount from\nR:9672938 10/07 AX 9415126318 T:5L:NA BRT: 3358,07 C:\nYou could enter\nBRT: ([\d,]+)""")
     tax_ids = fields.Many2many('account.tax', string='Taxes', ondelete='restrict', check_company=True)
     analytic_account_id = fields.Many2one('account.analytic.account', string='Analytic Account', ondelete='set null', check_company=True)
-    analytic_tag_ids = fields.Many2many('account.analytic.tag', string='Analytic Tags', check_company=True,
-                                        relation='account_reconcile_model_analytic_tag_rel')
+    analytic_tag_ids = fields.Many2many('account.analytic.tag', string='Analytic Tags', check_company=True)
 
     @api.onchange('tax_ids')
     def _onchange_tax_ids(self):

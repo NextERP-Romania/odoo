@@ -48,11 +48,13 @@ class PhoneMixin(models.AbstractModel):
         self._assert_phone_field()
         number_fields = self._phone_get_number_fields()
         for record in self:
+            sanitized = False
             for fname in number_fields:
                 sanitized = record.phone_get_sanitized_number(number_fname=fname)
                 if sanitized:
                     break
-            record.phone_sanitized = sanitized
+            if sanitized:
+                record.phone_sanitized = sanitized
 
     @api.depends('phone_sanitized')
     def _compute_blacklisted(self):
@@ -108,7 +110,10 @@ class PhoneMixin(models.AbstractModel):
         if not hasattr(self, "_phone_get_number_fields"):
             raise UserError(_('Invalid primary phone field on model %s', self._name))
         if not any(fname in self and self._fields[fname].type == 'char' for fname in self._phone_get_number_fields()):
-            raise UserError(_('Invalid primary phone field on model %s', self._name))
+            for fname in self._phone_get_number_fields():
+                print(self._name)
+                print(fname)
+            #raise UserError(_('Invalid primary phone field on model %s', self._name))
 
     def _phone_get_number_fields(self):
         """ This method returns the fields to use to find the number to use to
