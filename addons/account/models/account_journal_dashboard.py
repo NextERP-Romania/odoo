@@ -226,10 +226,12 @@ class account_journal(models.Model):
         number_draft = number_waiting = number_late = to_check_balance = 0
         sum_draft = sum_waiting = sum_late = 0.0
         if self.type in ('bank', 'cash'):
-            last_statement = self._get_last_bank_statement(
-                domain=[('move_id.state', '=', 'posted')])
-            last_balance = last_statement.balance_end
-            has_at_least_one_statement = bool(last_statement)
+            statement = self.env['account.bank.statement'].search([('journal_id', '=', self.id)])
+            if statement:
+                last_statement = self._get_last_bank_statement(
+                    domain=[('move_id.state', '=', 'posted')])
+                last_balance = last_statement.balance_end
+                has_at_least_one_statement = bool(last_statement)
             bank_account_balance, nb_lines_bank_account_balance = self._get_journal_bank_account_balance(
                 domain=[('move_id.state', '=', 'posted')])
             outstanding_pay_account_balance, nb_lines_outstanding_pay_account_balance = self._get_journal_outstanding_payments_account_balance(
