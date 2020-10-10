@@ -207,6 +207,11 @@ class Lead(models.Model):
         ('check_probability', 'check(probability >= 0 and probability <= 100)', 'The probability of closing the deal should be between 0% and 100%!')
     ]
 
+    def _phone_get_number_fields(self):
+        """ This method returns the fields to use to find the number to use to
+        send an SMS on a record. """
+        return ['mobile', 'phone']
+
     @api.depends('activity_date_deadline')
     def _compute_kanban_state(self):
         today = date.today()

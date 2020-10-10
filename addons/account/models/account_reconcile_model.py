@@ -59,7 +59,7 @@ class AccountReconcileModelLine(models.Model):
     tax_ids = fields.Many2many('account.tax', string='Taxes', ondelete='restrict', check_company=True)
     analytic_account_id = fields.Many2one('account.analytic.account', string='Analytic Account', ondelete='set null', check_company=True)
     analytic_tag_ids = fields.Many2many('account.analytic.tag', string='Analytic Tags', check_company=True,
-                                        relation='account_reconcile_model_analytic_tag_rel')
+                                        relation='account_reconcile_model_line_analytic_tag_rel')
 
     @api.onchange('tax_ids')
     def _onchange_tax_ids(self):
