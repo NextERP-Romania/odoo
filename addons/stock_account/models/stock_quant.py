@@ -57,6 +57,11 @@ class StockQuant(models.Model):
             if quant.product_id.lot_valuated:
                 quantity = quant.lot_id.with_company(quant.company_id).product_qty
                 value = quant.lot_id.with_company(quant.company_id).total_value
+            elif quant.product_id.cost_method == 'fifo':
+                quantity = quant.quantity
+                value = quant.product_id._run_fifo_value(
+                    quantity, location=quant.location_id
+                )
             else:
                 quantity = quant.product_id.with_company(quant.company_id).qty_available
                 value = quant.product_id.with_company(quant.company_id).total_value

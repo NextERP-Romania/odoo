@@ -156,7 +156,7 @@ class ProductProduct(models.Model):
             elif product.cost_method == 'average':
                 product.total_value = product._run_avco(at_date=at_date)[1]
             else:
-                product.total_value = product._run_fifo(qty_available, at_date=at_date)
+                product.total_value = product._run_fifo_value(qty_available, at_date=at_date)
             product.avg_cost = product.total_value / qty_available if qty_available else 0.0
 
     def write(self, vals):
@@ -229,10 +229,13 @@ class ProductProduct(models.Model):
         valued_locations = self.env['stock.location'].search([('is_valued_internal', '=', True)])
         return self.with_context(location=valued_locations.ids)
 
-    def _get_remaining_moves(self):
+    def _get_remaining_moves(self, lot=None, at_date=None, location=None):
+        """ Returns a dictionary of stock moves and their remaining quantities for each product in self."""
         moves_qty_by_product = {}
         for product in self:
-            moves, remaining_qty = product._run_fifo_get_stack()
+            if location:
+                product = product.with_context(location=location.ids)
+            moves, remaining_qty = product._run_fifo_get_stack(lot=lot, at_date=at_date, location=location)
             moves = self.env['stock.move'].concat(*moves)
             if not moves:
                 continue
@@ -244,7 +247,7 @@ class ProductProduct(models.Model):
     def _get_cogs_value(self, quantity):
         if self.cost_method in ['standard', 'average']:
             return self.standard_price * quantity
-        return self._run_fifo(quantity)
+        return self._run_fifo_value(quantity)
 
     def _run_avco(self, at_date=None, lot=None, method="realtime"):
         """ Recompute the average cost of the product base on the last closing
@@ -337,39 +340,63 @@ class ProductProduct(models.Model):
         if self.uom_id.compare(quantity, 0) <= 0:
             if at_date:
                 return quantity * self._get_standard_price_at_date(at_date)
-            return quantity * self.standard_price
-        external_location = location and location.is_valued_external
+            return [
+                {
+                    'move_id': False,
+                    'quantity': quantity,
+                    'value': quantity * self.standard_price,
+                    'description': _('Forced value for %s units') % quantity,
+                }
+            ]
 
-        fifo_cost = 0
-        fifo_stack, qty_on_first_move = self._run_fifo_get_stack(lot=lot, at_date=at_date, location=location)
-        last_move = False
+        fifo_list = []
+        remaining_moves = self._get_remaining_moves(lot=lot, at_date=at_date, location=location).get(self, {})
+        fifo_stack = sorted(remaining_moves.keys(), key=lambda sm: (sm.date, sm.id))
         # Going up to get the quantity in the argument
         while quantity > 0 and fifo_stack:
             move = fifo_stack.pop(0)
-            last_move = move
-            move_value = move.value
+            move_values = {
+                "move_id": move.id,
+                'quantity': move.remaining_qty,
+                'value': move.remaining_value,
+                'description': move.display_name,
+            }
             if at_date:
-                move_value = move._get_value(at_date=at_date)
-            if qty_on_first_move:
-                valued_qty = move._get_valued_qty()
-                in_qty = qty_on_first_move
-                in_value = move_value * in_qty / valued_qty
-                qty_on_first_move = 0
+                move_values = move._get_value_data(at_date=at_date)
+                move_values['move_id'] = move.id
+            rem_qty = move_values['quantity']
+            move_value = move_values['value']
+            if rem_qty >= quantity:
+                reserved_qty = min(quantity, rem_qty)
+                fifo_list.append(
+                    {
+                        'move_id': move.id,
+                        'quantity': reserved_qty,
+                        'value': move_value * reserved_qty / rem_qty,
+                        'description': move.display_name,
+                    }
+                )
+                quantity -= reserved_qty
             else:
-                in_qty = move._get_valued_qty()
-                in_value = move_value
-            if in_qty > quantity:
-                in_value = in_value * quantity / in_qty
-                in_qty = quantity
-            fifo_cost += in_value
-            quantity -= in_qty
+                fifo_list.append(move_values)
+                quantity -= move_values['quantity']
         # When we required more quantity than available we extrapolate with the last known price
         if quantity > 0:
-            if last_move and last_move.quantity:
-                fifo_cost += quantity * (last_move.value / last_move.quantity)
-            else:
-                fifo_cost += quantity * self.standard_price
-        return fifo_cost
+            fifo_list.append(
+                {
+                    'move_id': False,
+                    'quantity': quantity,
+                    'value': quantity * self.standard_price,
+                    'description': _('Forced value for %s units') % quantity,
+                }
+            )
+        return fifo_list
+
+    def _run_fifo_value(self, quantity, lot=None, at_date=None, location=None):
+        """ Returns the total value for the next outgoing product base on the qty give as argument."""
+        fifo_list = self._run_fifo(quantity, lot=lot, at_date=at_date, location=location)
+        total_value = sum(item['value'] for item in fifo_list)
+        return total_value
 
     def _run_fifo_get_stack(self, lot=None, at_date=None, location=None):
         # TODO: return a list of tuple (move, valued_qty) instead
@@ -378,7 +405,8 @@ class ProductProduct(models.Model):
         fifo_stack_size = 0
         if location:
             self = self.with_context(location=location.ids)  # noqa: PLW0642
-        if lot:
+            fifo_stack_size = int(self.with_context(to_date=at_date).qty_available)
+        elif lot:
             fifo_stack_size = lot.product_qty
         else:
             fifo_stack_size = int(self._with_valuation_context().with_context(to_date=at_date).qty_available)
@@ -387,7 +415,8 @@ class ProductProduct(models.Model):
 
         moves_domain = Domain([
             ('product_id', '=', self.id),
-            ('company_id', '=', self.env.company.id)
+            ('company_id', '=', self.env.company.id),
+            ('state', '=', 'done'),
         ])
         if lot:
             moves_domain &= Domain([('move_line_ids.lot_id', 'in', lot.id)])
@@ -399,14 +428,12 @@ class ProductProduct(models.Model):
             moves_domain &= Domain([('is_out', '=', True)])
         else:
             moves_domain &= Domain([('is_in', '=', True)])
-
         # Base limit to 100 to avoid issue with other UoM than Unit
         initial_limit = fifo_stack_size * 10
         unit_uom = self.env.ref('uom.product_uom_unit', raise_if_not_found=False)
         if unit_uom and self.uom_id != unit_uom:
             initial_limit = max(initial_limit, 100)
         moves_in = self.env['stock.move'].search(moves_domain, order='date desc, id desc', limit=initial_limit)
-
         remaining_qty_on_first_stack_move = 0
         current_offset = 0
         # Go to the bottom of the stack

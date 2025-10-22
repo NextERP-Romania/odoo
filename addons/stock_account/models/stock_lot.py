@@ -38,7 +38,7 @@ class StockLot(models.Model):
             elif lot.product_id.cost_method == 'average':
                 lot.total_value = lot.product_id._run_avco(at_date=at_date, lot=lot)[1]
             else:
-                lot.total_value = lot.product_id._run_fifo(qty_available, at_date=at_date, lot=lot)
+                lot.total_value = lot.product_id._run_fifo_value(qty_available, at_date=at_date, lot=lot)
             lot.avg_cost = lot.total_value / qty_available if qty_available else 0.0
 
     @api.model_create_multi
