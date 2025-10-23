@@ -81,13 +81,14 @@ class StockMove(models.Model):
 
     @api.depends('quantity', 'product_id.stock_move_ids.value')
     def _compute_remaining_qty(self):
-        products = self.product_id
-        remaining_by_product = products._get_remaining_moves()
-
         for move in self:
-            move.remaining_qty = remaining_by_product.get(move.product_id, {}).get(move, 0)
+            move.remaining_qty = 0
+            if move.location_dest_id._should_be_valued():
+                location = move.location_dest_id
+                remaining_by_product = move.product_id._get_remaining_moves(location=location)
+                move.remaining_qty = remaining_by_product.get(move.product_id, {}).get(move, 0)
 
-    @api.depends('value')
+    @api.depends('value', 'quantity', 'product_id.stock_move_ids.value')
     def _compute_remaining_value(self):
         for move in self:
             if not move.is_in:
@@ -131,8 +132,13 @@ class StockMove(models.Model):
         # It's called before action_done since we need the current fifo
         # stack. Limitation when validating at same time out and in.s
         moves_out = self.filtered(lambda m: m._is_out())
-        moves_out._set_value()
-        moves = super()._action_done(cancel_backorder=cancel_backorder)
+        moves_out_fifo = moves_out.filtered(lambda m: m.product_id.cost_method == 'fifo' and not m.origin_returned_move_id)
+        (moves_out - moves_out_fifo)._set_value()
+        moves = super(StockMove, self - moves_out_fifo)._action_done(cancel_backorder=cancel_backorder)
+        moves_out_fifo_splitted = moves_out_fifo._split_for_fifo_assignment()
+        for move in moves_out_fifo + moves_out_fifo_splitted:
+            move._set_value()
+            moves += super(StockMove, move)._action_done(cancel_backorder=cancel_backorder)
         moves_in = moves.filtered(lambda m: m.is_in or m.is_dropship)
         moves_in._set_value()
         moves._create_account_move()
@@ -249,7 +255,8 @@ class StockMove(models.Model):
                 continue
 
             if move.product_id.cost_method == 'fifo':
-                move.value = move.product_id._run_fifo(move._get_valued_qty())
+                fifo_list = move.product_id._run_fifo(move._get_valued_qty(), location=move.location_dest_id)
+                move.value = sum(item['value'] for item in fifo_list)
             else:
                 qty = move.product_uom._compute_quantity(move.quantity, move.product_id.uom_id, rounding_method='HALF-UP')
                 move.value = move.product_id.standard_price * qty
@@ -317,17 +324,29 @@ class StockMove(models.Model):
             if return_data.get('description'):
                 descriptions.append(return_data['description'])
 
-        # 4. standard_price
+        # 4. From origin move
+        if remaining_qty and self.move_orig_ids:
+            origin_data = self.move_orig_ids._get_value_data(
+                forced_std_price=forced_std_price,
+                at_date=at_date,
+                ignore_manual_update=ignore_manual_update)
+            proportion = remaining_qty / origin_data['quantity'] if origin_data['quantity'] else 0
+            value += proportion * origin_data['value']
+            remaining_qty -= origin_data['quantity']
+            if origin_data.get('description'):
+                descriptions.append(origin_data['description'])
+
+        # 5. standard_price
         if remaining_qty:
             std_price_data = self._get_value_from_std_price(remaining_qty, forced_std_price, at_date)
             value += std_price_data['value']
             descriptions.append(std_price_data.get('description'))
-
-        return {
+        res = {
             'value': value,
             'quantity': valued_qty,
             'description': ', '.join(descriptions),
         }
+        return res
 
     def _get_valued_qty(self, lot=None):
         self.ensure_one()
@@ -570,3 +589,25 @@ class StockMove(models.Model):
         if valued_type == 'out':
             return self.location_dest_id and self.location_dest_id.usage == 'supplier'
         return bool(self.picking_id.return_picking_id)
+
+    def _split_for_fifo_assignment(self):
+        """ Splits moves based on FIFO list coming from product _run_fifo.
+        """
+        fifo_split_vals_list = []
+        for move in self:
+            fifo_list = move.product_id.with_context(location=move.location_id.ids)._run_fifo(move.product_qty, location=move.location_id)
+            quantity = move.product_qty
+            while quantity > 0 and fifo_list:
+                fifo_item = fifo_list.pop(0)
+                fifo_qty = fifo_item['quantity']
+                if fifo_qty >= quantity:
+                    break
+                # Split the move
+                new_move_vals = move._split(fifo_qty)
+                fifo_split_vals_list += new_move_vals
+                quantity -= fifo_qty
+        if fifo_split_vals_list:
+            fifo_splitted_moves = self.env['stock.move'].create(fifo_split_vals_list)
+            fifo_splitted_moves.write({"state": "assigned"})
+            return fifo_splitted_moves
+        return self.env['stock.move']
